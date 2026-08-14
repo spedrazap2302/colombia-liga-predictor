@@ -20,8 +20,6 @@ def expected_goals(home_rating, away_rating, home_team=None, away_team=None, hom
         effective_home_rating += altitude_boost(home_team, away_team)
 
     expected_result = expected_score(effective_home_rating + HOME_ADVANTAGE + home_adjustment, away_rating)
-
-    expected_result = expected_score(effective_home_rating + HOME_ADVANTAGE, away_rating)
     tilt = (expected_result - 0.5) * 2
     home_xg = AVG_GOALS_PER_TEAM * (1 + tilt * 0.6)
     away_xg = AVG_GOALS_PER_TEAM * (1 - tilt * 0.6)
@@ -43,44 +41,53 @@ def dixon_coles_tau(home_goals, away_goals, lam, mu, rho):
         return 1.0
 
 
-def match_probabilities(home_rating, away_rating, home_team=None, away_team=None,
-                         home_adjustment=0, draw_inflation=DRAW_INFLATION, dixon_coles_rho=None):
-    """Returns (P(home win), P(draw), P(away win)) using a Poisson scoreline grid.
-    Exactly one of draw_inflation or dixon_coles_rho should be active --
-    pass dixon_coles_rho to use the more precise correction instead of
+def scoreline_probabilities(home_rating, away_rating, home_team=None, away_team=None,
+                             home_adjustment=0, draw_inflation=DRAW_INFLATION, dixon_coles_rho=None):
+    """Returns {(home_goals, away_goals): probability} for every scoreline up
+    to MAX_GOALS a side, with the same Dixon-Coles / draw-inflation
+    calibration applied as match_probabilities -- the single source of truth
+    both match_probabilities and the season simulator draw from, so the
+    displayed win/draw/loss odds and the simulated scorelines never drift
+    apart. Exactly one of draw_inflation or dixon_coles_rho should be active
+    -- pass dixon_coles_rho to use the more precise correction instead of
     the blanket draw_inflation multiplier (pass draw_inflation=1.0 when
     using dixon_coles_rho, to avoid stacking both)."""
     home_xg, away_xg = expected_goals(home_rating, away_rating, home_team, away_team, home_adjustment)
 
-    home_win = draw = away_win = 0.0
+    grid = {}
     for h in range(MAX_GOALS + 1):
         for a in range(MAX_GOALS + 1):
             p = poisson_pmf(h, home_xg) * poisson_pmf(a, away_xg)
             if dixon_coles_rho is not None:
                 p *= dixon_coles_tau(h, a, home_xg, away_xg, dixon_coles_rho)
-            if h > a:
-                home_win += p
-            elif h == a:
-                draw += p
-            else:
-                away_win += p
+            grid[(h, a)] = p
 
-    # Dixon-Coles doesn't guarantee the three probabilities sum to
-    # exactly 1 -- renormalize to be safe
+    # Dixon-Coles doesn't guarantee the grid sums to exactly 1 -- renormalize to be safe
     if dixon_coles_rho is not None:
-        total = home_win + draw + away_win
+        total = sum(grid.values())
         if total > 0:
-            home_win, draw, away_win = home_win / total, draw / total, away_win / total
+            grid = {k: v / total for k, v in grid.items()}
 
     if draw_inflation != 1.0:
-        new_draw = min(draw * draw_inflation, 0.95)
-        remaining = 1 - new_draw
-        old_remaining = home_win + away_win
-        if old_remaining > 0:
-            home_win = home_win / old_remaining * remaining
-            away_win = away_win / old_remaining * remaining
-        draw = new_draw
+        draw_mass = sum(v for (h, a), v in grid.items() if h == a)
+        new_draw_mass = min(draw_mass * draw_inflation, 0.95)
+        old_remaining = 1 - draw_mass
+        new_remaining = 1 - new_draw_mass
+        draw_scale = (new_draw_mass / draw_mass) if draw_mass > 0 else 1.0
+        remaining_scale = (new_remaining / old_remaining) if old_remaining > 0 else 1.0
+        grid = {(h, a): v * (draw_scale if h == a else remaining_scale) for (h, a), v in grid.items()}
 
+    return grid
+
+
+def match_probabilities(home_rating, away_rating, home_team=None, away_team=None,
+                         home_adjustment=0, draw_inflation=DRAW_INFLATION, dixon_coles_rho=None):
+    """Returns (P(home win), P(draw), P(away win)), summarized from scoreline_probabilities()."""
+    grid = scoreline_probabilities(home_rating, away_rating, home_team, away_team,
+                                    home_adjustment, draw_inflation, dixon_coles_rho)
+    home_win = sum(v for (h, a), v in grid.items() if h > a)
+    draw = sum(v for (h, a), v in grid.items() if h == a)
+    away_win = sum(v for (h, a), v in grid.items() if h < a)
     return home_win, draw, away_win
 
 

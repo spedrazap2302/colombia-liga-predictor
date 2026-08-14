@@ -4,10 +4,13 @@ import pandas as pd
 
 from load_data import load_data
 from elo_model import build_ratings
-from predict_match import expected_goals
+from predict_match import scoreline_probabilities, MAX_GOALS
 from standings import compute_standings, CURRENT_SEASON
 
 N_SIMULATIONS = 100000
+_N_SCORELINES = (MAX_GOALS + 1) ** 2
+_H_GRID, _A_GRID = np.meshgrid(np.arange(MAX_GOALS + 1), np.arange(MAX_GOALS + 1), indexing="ij")
+_H_FLAT, _A_FLAT = _H_GRID.ravel(), _A_GRID.ravel()
 
 
 def get_all_current_season_teams(played, upcoming, season):
@@ -20,12 +23,15 @@ def get_all_current_season_teams(played, upcoming, season):
 
 
 def simulate_score(home_team, away_team, ratings):
-    """Rolls one random scoreline for a match, weighted by each team's
-    Elo-based expected goals."""
-    home_xg, away_xg = expected_goals(ratings[home_team], ratings[away_team], home_team, away_team)
-    home_goals = np.random.poisson(home_xg)
-    away_goals = np.random.poisson(away_xg)
-    return home_goals, away_goals
+    """Rolls one random scoreline for a match, sampled from the same
+    calibrated scoreline grid (draw-inflation included) that
+    match_probabilities() uses for the displayed win/draw/loss percentages
+    -- so simulated seasons and the displayed match odds never drift apart."""
+    grid = scoreline_probabilities(ratings[home_team], ratings[away_team], home_team, away_team)
+    probs = np.array(list(grid.values()))
+    probs /= probs.sum()
+    idx = np.random.choice(len(probs), p=probs)
+    return list(grid.keys())[idx]
 
 
 def simulate_regular_season(played, upcoming, ratings, season):
@@ -150,26 +156,48 @@ def simulate_one_season(played, upcoming, ratings, season):
     champion = simulate_final(winner_a, winner_b, ratings)
     return champion
 def _build_team_index(played, upcoming, ratings, season):
-    """Fixed team <-> integer index mapping, plus a dense (T, T) lookup table
-    of expected home/away goals for every ordered team pair. expected_goals()
-    is a pure function of team identity (not match outcome), so precomputing
-    it once and doing a numpy fancy-index lookup per simulated match avoids
-    recomputing the same formula millions of times inside the Monte Carlo loop."""
+    """Fixed team <-> integer index mapping, plus a dense (T, T, scorelines)
+    cumulative-probability table for every ordered team pair, built from
+    scoreline_probabilities() -- the same calibrated (draw-inflation
+    included) distribution match_probabilities() uses for the displayed
+    win/draw/loss odds. Precomputing this once and sampling from it via
+    numpy indexing avoids recomputing the same grid millions of times
+    inside the Monte Carlo loop, while keeping simulated seasons
+    statistically consistent with the odds shown for individual matches."""
     teams = sorted(get_all_current_season_teams(played, upcoming, season))
     team_to_idx = {team: i for i, team in enumerate(teams)}
     T = len(teams)
 
-    xg_home = np.zeros((T, T))
-    xg_away = np.zeros((T, T))
+    cdf = np.zeros((T, T, _N_SCORELINES))
     for i, home in enumerate(teams):
         for j, away in enumerate(teams):
             if i == j:
                 continue
-            h, a = expected_goals(ratings[home], ratings[away], home, away)
-            xg_home[i, j] = h
-            xg_away[i, j] = a
+            grid = scoreline_probabilities(ratings[home], ratings[away], home, away)
+            probs = np.array([grid[(h, a)] for h, a in zip(_H_FLAT, _A_FLAT)])
+            probs /= probs.sum()
+            cdf[i, j] = np.cumsum(probs)
 
-    return teams, team_to_idx, xg_home, xg_away
+    return teams, team_to_idx, cdf
+
+
+def _sample_scorelines_fixed(rng, cdf_1d, size):
+    """Draws `size` scorelines from a single shared distribution (used when
+    every trial faces the same fixed matchup, e.g. one regular-season fixture
+    simulated across all N trials) via inverse-CDF sampling."""
+    u = rng.random(size)
+    idx = np.clip((cdf_1d[None, :] < u[:, None]).sum(axis=1), 0, len(cdf_1d) - 1)
+    return _H_FLAT[idx], _A_FLAT[idx]
+
+
+def _sample_scorelines_varying(rng, cdf, home_idx, away_idx):
+    """Draws one scoreline per row from a per-row distribution (used when the
+    matchup itself varies by trial, e.g. group-stage games after the
+    cuadrangular draw) via the same inverse-CDF technique, batched."""
+    cdf_batch = cdf[home_idx, away_idx]  # (M, scorelines)
+    u = rng.random(len(home_idx))
+    idx = np.clip((cdf_batch < u[:, None]).sum(axis=1), 0, cdf_batch.shape[1] - 1)
+    return _H_FLAT[idx], _A_FLAT[idx]
 
 
 def _base_points_and_goal_diff(played, team_to_idx, season):
@@ -219,7 +247,7 @@ def run_monte_carlo(played, upcoming, ratings, season, n_simulations=N_SIMULATIO
     rng = np.random.default_rng(42)
     N = n_simulations
 
-    teams, team_to_idx, xg_home, xg_away = _build_team_index(played, upcoming, ratings, season)
+    teams, team_to_idx, cdf = _build_team_index(played, upcoming, ratings, season)
     T = len(teams)
     base_points, base_gd = _base_points_and_goal_diff(played, team_to_idx, season)
 
@@ -229,12 +257,17 @@ def run_monte_carlo(played, upcoming, ratings, season, n_simulations=N_SIMULATIO
     away_idx = remaining["away_team"].map(team_to_idx).to_numpy(dtype=np.int64)
     R = len(home_idx)
 
-    home_xg = xg_home[home_idx, away_idx]
-    away_xg = xg_away[home_idx, away_idx]
     # int16 keeps these (N, R) arrays small -- goal counts never come close to
     # its range, and this matters at N=100,000 on a memory-constrained host.
-    home_goals = rng.poisson(home_xg[None, :], size=(N, R)).astype(np.int16)
-    away_goals = rng.poisson(away_xg[None, :], size=(N, R)).astype(np.int16)
+    # Each fixture's opponents are fixed across all N trials, so one shared
+    # distribution is sampled N times per fixture (a small R-iteration loop,
+    # each iteration itself fully vectorized across N).
+    home_goals = np.zeros((N, R), dtype=np.int16)
+    away_goals = np.zeros((N, R), dtype=np.int16)
+    for r in range(R):
+        hg, ag = _sample_scorelines_fixed(rng, cdf[home_idx[r], away_idx[r]], N)
+        home_goals[:, r] = hg
+        away_goals[:, r] = ag
 
     pts_home = np.where(home_goals > away_goals, 3, np.where(home_goals == away_goals, 1, 0)).astype(np.float64)
     pts_away = np.where(away_goals > home_goals, 3, np.where(home_goals == away_goals, 1, 0)).astype(np.float64)
@@ -276,8 +309,7 @@ def run_monte_carlo(played, upcoming, ratings, season, n_simulations=N_SIMULATIO
                 if home_slot == away_slot:
                     continue
                 ht, at = group[:, home_slot], group[:, away_slot]
-                hg = rng.poisson(xg_home[ht, at])
-                ag = rng.poisson(xg_away[ht, at])
+                hg, ag = _sample_scorelines_varying(rng, cdf, ht, at)
                 ph = np.where(hg > ag, 3, np.where(hg == ag, 1, 0))
                 pa = np.where(ag > hg, 3, np.where(hg == ag, 1, 0))
                 gp[:, home_slot] += ph
@@ -294,10 +326,8 @@ def run_monte_carlo(played, upcoming, ratings, season, n_simulations=N_SIMULATIO
     winner_b = simulate_group_vectorized(group_b)
 
     # ---- Final: two legs, aggregate score, coin flip on an exact tie ----
-    hg1 = rng.poisson(xg_home[winner_a, winner_b])
-    ag1 = rng.poisson(xg_away[winner_a, winner_b])
-    hg2 = rng.poisson(xg_home[winner_b, winner_a])
-    ag2 = rng.poisson(xg_away[winner_b, winner_a])
+    hg1, ag1 = _sample_scorelines_varying(rng, cdf, winner_a, winner_b)
+    hg2, ag2 = _sample_scorelines_varying(rng, cdf, winner_b, winner_a)
     agg_a, agg_b = hg1 + ag2, ag1 + hg2
     coin = rng.random(N) < 0.5
     champion = np.where(

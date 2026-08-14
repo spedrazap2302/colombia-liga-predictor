@@ -3,7 +3,7 @@ from load_data import load_data
 from team_home_advantage import compute_team_home_adjustments
 
 INITIAL_RATING = 1500
-K_FACTOR = 20             # how much each match result moves a team's rating
+K_FACTOR = 25             # how much each match result moves a team's rating -- tuned via tune_k_factor.py sweep
 HOME_ADVANTAGE = 100      # rating-point bonus for playing at home
 SEASON_REGRESSION = 0.25  # ratings drift back toward average between tournaments
 
