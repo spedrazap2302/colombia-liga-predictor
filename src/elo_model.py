@@ -6,6 +6,19 @@ INITIAL_RATING = 1500
 K_FACTOR = 25             # how much each match result moves a team's rating -- tuned via tune_k_factor.py sweep
 HOME_ADVANTAGE = 100      # rating-point bonus for playing at home
 SEASON_REGRESSION = 0.25  # ratings drift back toward average between tournaments
+USE_MARGIN_OF_VICTORY = True  # bigger wins move ratings more (tested in compare_margin_of_victory.py)
+
+
+def margin_multiplier(goal_difference):
+    """How much extra a result counts, by winning margin. Same scale the
+    World Football Elo ratings use: a 1-goal win (or a draw) counts once,
+    a 2-goal win 1.5 times, and bigger wins a bit more each extra goal."""
+    n = abs(goal_difference)
+    if n <= 1:
+        return 1.0
+    if n == 2:
+        return 1.5
+    return (11 + n) / 8
 
 
 def expected_score(rating_a, rating_b):
@@ -13,11 +26,13 @@ def expected_score(rating_a, rating_b):
     return 1 / (1 + 10 ** ((rating_b - rating_a) / 400))
 
 
-def build_ratings(matches: pd.DataFrame, use_per_team_home_adv=False):
+def build_ratings(matches: pd.DataFrame, use_per_team_home_adv=False, use_margin=None):
     ratings = {}
     history = []
     current_season = None
     home_adjustments = compute_team_home_adjustments(matches) if use_per_team_home_adv else {}
+    if use_margin is None:
+        use_margin = USE_MARGIN_OF_VICTORY
 
     def get_rating(team):
         return ratings.setdefault(team, INITIAL_RATING)
@@ -43,8 +58,9 @@ def build_ratings(matches: pd.DataFrame, use_per_team_home_adv=False):
         team_home_advantage = HOME_ADVANTAGE + home_adjustments.get(home, 0)
         expected_home = expected_score(home_rating + team_home_advantage, away_rating)
 
-        ratings[home] = home_rating + K_FACTOR * (actual_home - expected_home)
-        ratings[away] = away_rating + K_FACTOR * ((1 - actual_home) - (1 - expected_home))
+        k = K_FACTOR * (margin_multiplier(m["home_goals"] - m["away_goals"]) if use_margin else 1.0)
+        ratings[home] = home_rating + k * (actual_home - expected_home)
+        ratings[away] = away_rating + k * ((1 - actual_home) - (1 - expected_home))
 
     return ratings
 

@@ -47,8 +47,9 @@ def simulate_regular_season(played, upcoming, ratings, season):
     for team in get_all_current_season_teams(played, upcoming, season):
         ensure(team)
 
-    # Real results already played
-    real = played[played["season"] == season]
+    # Real results already played (regular season only -- cuadrangular games
+    # don't count toward the table that decides the top 8)
+    real = played[(played["season"] == season) & (played["phase_type"] == "regular")]
     for _, m in real.iterrows():
         home, away, hg, ag = m["home_team"], m["away_team"], m["home_goals"], m["away_goals"]
         goal_diff[home] += hg - ag
@@ -92,27 +93,45 @@ def draw_cuadrangular_groups(top_8):
     return group_a, group_b
 
 
-def simulate_group(group, ratings, seed_team):
+def get_live_cuadrangular(played, upcoming, season):
+    """Once the real cuadrangular groups are known (their games are in the
+    data), returns them so the simulator uses the actual groups and the
+    results already played, instead of a random draw.
+
+    Returns None before the cuadrangulares start. Otherwise a dict:
+      "group_A"/"group_B": {"teams": [seed, other, other, other],
+                            "played": list of (home, away, home_goals, away_goals)}
+      "final": list of played final legs as (home, away, home_goals, away_goals, penalty_winner)
+    The seed of each group is its team that finished highest in the regular
+    season (1st or 2nd place), which wins ties on points ("punto invisible")."""
+    season_rows = pd.concat([played, upcoming])
+    season_rows = season_rows[(season_rows["season"] == season) & (season_rows["phase_type"] == "cuadrangular")]
+    groups = {}
+    for stage in ("group_A", "group_B"):
+        rows = season_rows[season_rows["stage"] == stage]
+        teams = set(rows["home_team"]) | set(rows["away_team"])
+        if len(teams) != 4:
+            return None  # groups not fully known yet: fall back to the random draw
+        groups[stage] = {"teams": sorted(teams), "played": []}
+
+    table = compute_standings(played, season)  # regular season only
+    position = {team: i for i, team in enumerate(table["team"])}
+    for stage, g in groups.items():
+        g["teams"].sort(key=lambda t: position.get(t, 99))  # slot 0 = best-placed team = seed
+        done = played[(played["season"] == season) & (played["phase_type"] == "cuadrangular") & (played["stage"] == stage)]
+        g["played"] = [(m.home_team, m.away_team, int(m.home_goals), int(m.away_goals)) for m in done.itertuples()]
+
+    finals = played[(played["season"] == season) & (played["phase_type"] == "cuadrangular") & (played["stage"] == "final")]
+    groups["final"] = [(m.home_team, m.away_team, int(m.home_goals), int(m.away_goals), m.penalty_winner)
+                       for m in finals.sort_values("date").itertuples()]
+    return groups
+
+
+def simulate_group(group, ratings, seed_team, played_games=()):
     """Simulates a double round-robin (home and away) within a group
     of 4 teams. The seed_team gets the tiebreaker edge on level points,
     matching the real regulation."""
-    points = {team: 0 for team in group}
-    goal_diff = {team: 0 for team in group}
-
-    for home in group:
-        for away in group:
-            if home == away:
-                continue
-            hg, ag = simulate_score(home, away, ratings)
-            goal_diff[home] += hg - ag
-            goal_diff[away] += ag - hg
-            if hg > ag:
-                points[home] += 3
-            elif hg < ag:
-                points[away] += 3
-            else:
-                points[home] += 1
-                points[away] += 1
+    points, goal_diff = _play_group(group, ratings, played_games)
 
     def sort_key(team):
         # seed_team wins ties over everyone else; otherwise sort by
@@ -122,6 +141,30 @@ def simulate_group(group, ratings, seed_team):
 
     ranked = sorted(group, key=sort_key, reverse=True)
     return ranked[0]  # group winner
+
+
+def _play_group(group, ratings, played_games=()):
+    """Double round-robin in a group of 4: real results for games already
+    played, a simulated score for every game still to come."""
+    points = {team: 0 for team in group}
+    goal_diff = {team: 0 for team in group}
+    real = {(h, a): (hg, ag) for h, a, hg, ag in played_games}
+
+    for home in group:
+        for away in group:
+            if home == away:
+                continue
+            hg, ag = real.get((home, away)) or simulate_score(home, away, ratings)
+            goal_diff[home] += hg - ag
+            goal_diff[away] += ag - hg
+            if hg > ag:
+                points[home] += 3
+            elif hg < ag:
+                points[away] += 3
+            else:
+                points[home] += 1
+                points[away] += 1
+    return points, goal_diff
 
 
 def simulate_final(team_a, team_b, ratings):
@@ -146,12 +189,17 @@ def simulate_final(team_a, team_b, ratings):
 def simulate_one_season(played, upcoming, ratings, season):
     """Runs one complete simulated season end-to-end: regular season
     -> top 8 -> cuadrangular groups -> final. Returns the champion."""
-    final_table = simulate_regular_season(played, upcoming, ratings, season)
-    top_8 = final_table[:8]
-
-    group_a, group_b = draw_cuadrangular_groups(top_8)
-    winner_a = simulate_group(group_a, ratings, seed_team=top_8[0])
-    winner_b = simulate_group(group_b, ratings, seed_team=top_8[1])
+    live = get_live_cuadrangular(played, upcoming, season)
+    if live:
+        ga, gb = live["group_A"], live["group_B"]
+        winner_a = simulate_group(ga["teams"], ratings, seed_team=ga["teams"][0], played_games=ga["played"])
+        winner_b = simulate_group(gb["teams"], ratings, seed_team=gb["teams"][0], played_games=gb["played"])
+    else:
+        final_table = simulate_regular_season(played, upcoming, ratings, season)
+        top_8 = final_table[:8]
+        group_a, group_b = draw_cuadrangular_groups(top_8)
+        winner_a = simulate_group(group_a, ratings, seed_team=top_8[0])
+        winner_b = simulate_group(group_b, ratings, seed_team=top_8[1])
 
     champion = simulate_final(winner_a, winner_b, ratings)
     return champion
@@ -208,7 +256,7 @@ def _base_points_and_goal_diff(played, team_to_idx, season):
     points = np.zeros(T)
     goal_diff = np.zeros(T)
 
-    real = played[played["season"] == season]
+    real = played[(played["season"] == season) & (played["phase_type"] == "regular")]
     for _, m in real.iterrows():
         hi, ai = team_to_idx[m["home_team"]], team_to_idx[m["away_team"]]
         hg, ag = m["home_goals"], m["away_goals"]
@@ -249,6 +297,9 @@ def run_monte_carlo(played, upcoming, ratings, season, n_simulations=N_SIMULATIO
 
     teams, team_to_idx, cdf = _build_team_index(played, upcoming, ratings, season)
     T = len(teams)
+    live = get_live_cuadrangular(played, upcoming, season)
+    if live:
+        return _run_monte_carlo_live(live, teams, team_to_idx, cdf, rng, N)
     base_points, base_gd = _base_points_and_goal_diff(played, team_to_idx, season)
 
     # ---- Regular season: remaining fixtures, simulated for all N trials at once ----
@@ -344,26 +395,73 @@ def run_monte_carlo(played, upcoming, ratings, season, n_simulations=N_SIMULATIO
     results.index += 1
     return results
 
-def simulate_group_detailed(group, ratings, seed_team):
+def _run_monte_carlo_live(live, teams, team_to_idx, cdf, rng, N):
+    """Title odds once the cuadrangulares have started: the real groups,
+    the real results so far, and only the remaining games simulated."""
+    T = len(teams)
+
+    def group_winners(group):
+        idx = [team_to_idx[t] for t in group["teams"]]       # slot 0 = seed
+        slot = {t: i for i, t in enumerate(group["teams"])}
+        gp = np.zeros((N, 4))
+        gd = np.zeros((N, 4))
+        done = set()
+        for h, a, hg, ag in group["played"]:
+            hs, as_ = slot[h], slot[a]
+            gp[:, hs] += 3 if hg > ag else 1 if hg == ag else 0
+            gp[:, as_] += 3 if ag > hg else 1 if hg == ag else 0
+            gd[:, hs] += hg - ag
+            gd[:, as_] += ag - hg
+            done.add((hs, as_))
+        for hs in range(4):
+            for as_ in range(4):
+                if hs == as_ or (hs, as_) in done:
+                    continue
+                hg, ag = _sample_scorelines_fixed(rng, cdf[idx[hs], idx[as_]], N)
+                gp[:, hs] += np.where(hg > ag, 3, np.where(hg == ag, 1, 0))
+                gp[:, as_] += np.where(ag > hg, 3, np.where(hg == ag, 1, 0))
+                gd[:, hs] += hg - ag
+                gd[:, as_] += ag - hg
+        is_seed = np.zeros((N, 4))
+        is_seed[:, 0] = 1
+        winner_slot = _row_argsort_desc(gp, is_seed, gd)[:, 0]
+        return np.array(idx)[winner_slot]
+
+    winner_a = group_winners(live["group_A"])
+    winner_b = group_winners(live["group_B"])
+
+    legs = live["final"]
+    if len(legs) >= 2:  # final over: the champion is known
+        (h1, a1, hg1, ag1, _), (h2, a2, hg2, ag2, pens) = legs[:2]
+        agg_1, agg_2 = hg1 + ag2, ag1 + hg2
+        champ = h1 if agg_1 > agg_2 else a1 if agg_2 > agg_1 else pens
+        champion = np.full(N, team_to_idx[champ])
+    else:
+        if legs:  # first leg played: finalists fixed, simulate the second leg only
+            h1, a1, hg1_real, ag1_real, _ = legs[0]
+            winner_a = np.full(N, team_to_idx[h1])
+            winner_b = np.full(N, team_to_idx[a1])
+            hg1, ag1 = np.full(N, hg1_real), np.full(N, ag1_real)
+        else:
+            hg1, ag1 = _sample_scorelines_varying(rng, cdf, winner_a, winner_b)
+        hg2, ag2 = _sample_scorelines_varying(rng, cdf, winner_b, winner_a)
+        agg_a, agg_b = hg1 + ag2, ag1 + hg2
+        coin = rng.random(N) < 0.5
+        champion = np.where(agg_a > agg_b, winner_a,
+                            np.where(agg_b > agg_a, winner_b, np.where(coin, winner_a, winner_b)))
+
+    counts = np.bincount(champion, minlength=T)
+    results = pd.DataFrame({"team": teams, "title_probability_%": np.round(counts / N * 100, 1)})
+    results = results[results["title_probability_%"] > 0] if counts.sum() else results
+    results = results.sort_values("title_probability_%", ascending=False).reset_index(drop=True)
+    results.index += 1
+    return results
+
+
+def simulate_group_detailed(group, ratings, seed_team, played_games=()):
     """Same as simulate_group, but also returns the full group table
     (for display), not just the winner."""
-    points = {team: 0 for team in group}
-    goal_diff = {team: 0 for team in group}
-
-    for home in group:
-        for away in group:
-            if home == away:
-                continue
-            hg, ag = simulate_score(home, away, ratings)
-            goal_diff[home] += hg - ag
-            goal_diff[away] += ag - hg
-            if hg > ag:
-                points[home] += 3
-            elif hg < ag:
-                points[away] += 3
-            else:
-                points[home] += 1
-                points[away] += 1
+    points, goal_diff = _play_group(group, ratings, played_games)
 
     def sort_key(team):
         is_seed = 1 if team == seed_team else 0
@@ -406,9 +504,15 @@ def simulate_one_season_detailed(played, upcoming, ratings, season):
     final_table = simulate_regular_season(played, upcoming, ratings, season)
     top_8 = final_table[:8]
 
-    group_a, group_b = draw_cuadrangular_groups(top_8)
-    winner_a, table_a = simulate_group_detailed(group_a, ratings, seed_team=top_8[0])
-    winner_b, table_b = simulate_group_detailed(group_b, ratings, seed_team=top_8[1])
+    live = get_live_cuadrangular(played, upcoming, season)
+    if live:  # real groups and real results so far; only the rest is simulated
+        ga, gb = live["group_A"], live["group_B"]
+        winner_a, table_a = simulate_group_detailed(ga["teams"], ratings, ga["teams"][0], ga["played"])
+        winner_b, table_b = simulate_group_detailed(gb["teams"], ratings, gb["teams"][0], gb["played"])
+    else:
+        group_a, group_b = draw_cuadrangular_groups(top_8)
+        winner_a, table_a = simulate_group_detailed(group_a, ratings, seed_team=top_8[0])
+        winner_b, table_b = simulate_group_detailed(group_b, ratings, seed_team=top_8[1])
 
     champion, final_legs = simulate_final_detailed(winner_a, winner_b, ratings)
 

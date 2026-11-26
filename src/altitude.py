@@ -19,7 +19,12 @@ TEAM_ALTITUDE = {
     "Jaguares": 30,       # Monteria
     "Junior": 20,         # Barranquilla (if this ever reappears in your data)
     "Inter Bogota": 2640,
-    "Alianza": 1720,      # Valledupar area teams vary; adjust if needed
+    "Alianza": 170,       # Valledupar (was 1720 by mistake -- Valledupar is near sea level)
+    "Aguilas": 2125,      # Rionegro (was missing, so it got the 1000 m default)
+    "Quindio": 1483,      # Armenia
+    "Tigres": 2600,       # Bogota
+    "Uniautonoma": 20,    # Barranquilla
+    "Leones": 1550,       # Itagui (approx.)
     "Llaneros": 442,      # Villavicencio
     "Fortaleza": 2640,    # Bogota-based
     "Patriotas": 2782,    # Tunja

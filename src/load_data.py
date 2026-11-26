@@ -1,10 +1,15 @@
 import pandas as pd
 
-def load_data(filepath="data/matches.csv.xlsx"):
-    df = pd.read_excel(filepath)
+DATA_PATH = "data/matches.csv"
+
+
+def load_data(filepath=DATA_PATH):
+    """Reads every match (played and upcoming) and splits them in two.
+    The file is a plain CSV so the daily updater (update_results.py) can add
+    new results automatically and GitHub can show exactly what changed."""
+    df = pd.read_csv(filepath, dtype={"season": str})
     df["date"] = pd.to_datetime(df["date"])
-    df["season"] = df["season"].astype(str)
-    df = df.sort_values("date").reset_index(drop=True)
+    df = df.sort_values("date", kind="stable").reset_index(drop=True)
 
     played = df.dropna(subset=["home_goals", "away_goals"]).copy()
     upcoming = df[df["home_goals"].isna() | df["away_goals"].isna()].copy()

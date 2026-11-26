@@ -4,7 +4,8 @@ from load_data import load_data
 CURRENT_SEASON = "2026-II"
 
 def compute_standings(played: pd.DataFrame, season=CURRENT_SEASON):
-    season_matches = played[played["season"] == season]
+    # regular-season table only: cuadrangular and final games are a separate stage
+    season_matches = played[(played["season"] == season) & (played["phase_type"] == "regular")]
 
     stats = {}
 

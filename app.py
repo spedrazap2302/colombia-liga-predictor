@@ -10,7 +10,7 @@ from load_data import load_data
 from elo_model import build_ratings
 from predict_match import match_probabilities
 from standings import compute_standings, CURRENT_SEASON
-from simulate_season import run_monte_carlo, N_SIMULATIONS, simulate_one_season_detailed, simulate_score
+from simulate_season import run_monte_carlo, N_SIMULATIONS, simulate_one_season_detailed, simulate_score, get_live_cuadrangular
 import zlib
 from team_home_advantage import compute_team_home_adjustments
 
@@ -29,7 +29,7 @@ st.title("🇨🇴 Liga BetPlay Colombia — Predictor")
 def get_data(file_mtime):
     return load_data(data_path)
 
-data_path = "data/matches.csv.xlsx"
+data_path = "data/matches.csv"
 played, upcoming = get_data(os.path.getmtime(data_path))
 
 @st.cache_data
@@ -53,7 +53,8 @@ def get_championship_probabilities(_played, _upcoming, _ratings, cache_key):
 
 with tab1:
     st.header("Probability of winning the 2026-II title")
-    st.caption("Updates automatically whenever new results are added to the spreadsheet.")
+    last_game = played["date"].max().strftime("%b %d, %Y")
+    st.caption(f"Results are added automatically every day from ESPN. Latest result in the data: {last_game}.")
 
     with st.spinner("Calculating..."):
         probabilities = get_championship_probabilities(played, upcoming, ratings, os.path.getmtime(data_path))
@@ -98,9 +99,17 @@ with tab2:
 
     reroll = st.button("Re-roll simulated scores")
 
+    # Scheduled fixtures, plus the cuadrangular games still to play (ESPN only
+    # lists games once they're played, so these come from the known groups).
+    fixtures = [(row["date"].date(), row["home_team"], row["away_team"]) for _, row in upcoming.iterrows()]
+    live = get_live_cuadrangular(played, upcoming, CURRENT_SEASON)
+    if live:
+        for stage in ("group_A", "group_B"):
+            group, done = live[stage]["teams"], {(h, a) for h, a, _, _ in live[stage]["played"]}
+            fixtures += [(f"Cuadrangular {stage[-1]}", h, a) for h in group for a in group if h != a and (h, a) not in done]
+
     rows = []
-    for _, row in upcoming.iterrows():
-        home, away = row["home_team"], row["away_team"]
+    for when, home, away in fixtures:
         if home not in ratings or away not in ratings:
             continue
         hw, d, aw = match_probabilities(ratings[home], ratings[away], home, away, home_adjustments.get(home, 0))
@@ -108,7 +117,7 @@ with tab2:
         np.random.seed(match_seed)
         sim_hg, sim_ag = simulate_score(home, away, ratings)
         rows.append({
-            "Date": row["date"].date(),
+            "Date": str(when),
             "Home": home, "Away": away,
             "Home Win %": round(hw * 100, 1),
             "Draw %": round(d * 100, 1),
