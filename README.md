@@ -77,6 +77,9 @@ To get the latest results by hand: `python src/update_results.py` (add `--dry-ru
 - A newly promoted team stops the updater until its name is added to `TEAM_MAP` in `src/update_results.py`, so nothing is saved under the wrong name.
 - Elo only knows results. It can't see injuries, transfers or a new coach until the results show it.
 
+## AI acknowledgment
+
+I used Claude (Anthropic) as a coding assistant: to plan, debug and test ideas, and later to build the automatic updater and polish the project for my portfolio.
 
 ## Author
 
