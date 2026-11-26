@@ -2,7 +2,7 @@
 
 Who will win the Liga BetPlay (Colombia's top football league), and how sure can we be? This Streamlit app rates every team with an Elo system, turns ratings into match probabilities with a Poisson goals model, and simulates the rest of the season 100,000 times, including the cuadrangular group stage and the two-legged final, to get each team's title odds.
 
-**Live app:** _coming soon_
+**Live app:** [Open the app](https://colombia-liga-predictor-w95bigyf48nnmqsau4bpsn.streamlit.app/)
 
 ## What's in the app
 
